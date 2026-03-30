@@ -1,3 +1,6 @@
+# RSA Keys (NEVER commit private keys)
+Keys/
+
 # Created by https://www.toptal.com/developers/gitignore/api/dotenv,csharp,visualstudio,visualstudiocode,rider
 # Edit at https://www.toptal.com/developers/gitignore?templates=dotenv,csharp,visualstudio,visualstudiocode,rider
 

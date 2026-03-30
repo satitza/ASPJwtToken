@@ -1,4 +1,3 @@
-﻿using System.Text;
 using JwtTokenExample.Services;
 using JwtTokenExample.Services.Soap;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -9,11 +8,13 @@ namespace JwtTokenExample.Configuration
 {
     public static class Extension
     {
-        public static void ConfigureJwt(this IServiceCollection services)
+        public static void ConfigureJwt(this IServiceCollection services, RsaKeyProvider rsaKeyProvider)
         {
             services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 .AddJwtBearer(options =>
                 {
+                    var validationKey = new RsaSecurityKey(rsaKeyProvider.PublicKey);
+
                     options.TokenValidationParameters = new TokenValidationParameters
                     {
                         ValidateIssuer = true,
@@ -24,10 +25,22 @@ namespace JwtTokenExample.Configuration
                         LifetimeValidator = (notBefore, expires, securityToken, validationParameters) =>
                             expires > DataTypeHelper.GetDateTimeUTCPlus7(),
                         ValidateIssuerSigningKey = true,
-                        IssuerSigningKey =
-                            new SymmetricSecurityKey(
-                                Encoding.UTF8.GetBytes("JwtSettings:AccessTokenSecretKey"
-                                    .GetConfigurationValue()))
+                        IssuerSigningKey = validationKey,
+                        ValidAlgorithms = new[] { SecurityAlgorithms.RsaSha256 }
+                    };
+
+                    // When access token expires, check for refresh token cookie
+                    // and return a hint header so the browser knows to call /refresh
+                    options.Events = new JwtBearerEvents
+                    {
+                        OnAuthenticationFailed = context =>
+                        {
+                            if (context.Exception is SecurityTokenExpiredException)
+                            {
+                                context.Response.Headers.Add("X-Token-Expired", "true");
+                            }
+                            return Task.CompletedTask;
+                        }
                     };
                 });
         }
@@ -76,6 +89,7 @@ namespace JwtTokenExample.Configuration
 
         public static void ConfigureDependencyInjection(this IServiceCollection services)
         {
+            services.AddSingleton<RefreshTokenStore>();
             services.AddSingleton<IEZAuthenticationService, EZAuthenticationService>();
             services.AddSingleton<ISoapService, SoapService>();
         }

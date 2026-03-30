@@ -1,13 +1,16 @@
 using JwtTokenExample.Configuration;
+using JwtTokenExample.Services;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 DataTypeHelper.SetConfiguration(builder.Configuration);
 
-// Add services to the container.
+// Initialize RSA key provider (generates keys if not exist)
+var rsaKeyProvider = new RsaKeyProvider(builder.Configuration, builder.Environment);
+builder.Services.AddSingleton(rsaKeyProvider);
 
-// config jwt
-builder.Services.ConfigureJwt();
+// config jwt with RSA public key validation
+builder.Services.ConfigureJwt(rsaKeyProvider);
 
 // config swagger
 builder.Services.ConfigureSwagger();
@@ -20,16 +23,11 @@ builder.Services.AddMvc(config =>
     config.InputFormatters.Insert(0, new XDocumentInputFormatter());
 }).SetCompatibilityVersion(CompatibilityVersion.Latest).AddXmlSerializerFormatters();
 
-//builder.Services.AddControllers();
-
-
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();

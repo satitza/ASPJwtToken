@@ -1,6 +1,5 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text;
 using JwtTokenExample.Configuration;
 using JwtTokenExample.Models;
 using Microsoft.IdentityModel.Tokens;
@@ -9,67 +8,85 @@ namespace JwtTokenExample.Services
 {
     public class JWTTokenService
     {
-        readonly JwtSecurityTokenHandler _tokenHandler;
+        private readonly JwtSecurityTokenHandler _tokenHandler;
+        private readonly RsaKeyProvider _rsaKeyProvider;
 
-        public JWTTokenService(JwtSecurityTokenHandler tokenHandler)
+        public JWTTokenService(JwtSecurityTokenHandler tokenHandler, RsaKeyProvider rsaKeyProvider)
         {
             _tokenHandler = tokenHandler;
+            _rsaKeyProvider = rsaKeyProvider;
         }
 
-        public SecurityToken GenerateAccessToken(UserAuthenticationModel user)
+        public (SecurityToken Token, string Jti) GenerateAccessToken(string userName, string userId)
         {
-            try
-            {
-                var secretKey =
-                    new SymmetricSecurityKey(
-                        Encoding.UTF8.GetBytes("JwtSettings:AccessTokenSecretKey".GetConfigurationValue()));
-                var accessTokenSecurityObject = _tokenHandler.CreateToken(new SecurityTokenDescriptor
-                {
-                    Subject = new ClaimsIdentity(new Claim[]
-                    {
-                        new Claim(ClaimTypes.Email, user.UserName),
-                        new Claim("user_id", "1234", ClaimValueTypes.Integer),
-                    }),
-                    Expires = DataTypeHelper.GetDateTimeUTCPlus7().AddMinutes(1),
-                    Audience = "JwtSettings:Audience".GetConfigurationValue(),
-                    Issuer = "JwtSettings:Issuer".GetConfigurationValue(),
-                    SigningCredentials =
-                        new SigningCredentials(secretKey, SecurityAlgorithms.HmacSha256)
-                });
+            var jti = Guid.NewGuid().ToString();
+            var signingKey = new RsaSecurityKey(_rsaKeyProvider.PrivateKey);
 
-                return accessTokenSecurityObject;
-            }
-            catch (Exception e)
+            var token = _tokenHandler.CreateToken(new SecurityTokenDescriptor
             {
-                throw;
-            }
+                Subject = new ClaimsIdentity(new[]
+                {
+                    new Claim(JwtRegisteredClaimNames.Sub, userId),
+                    new Claim(JwtRegisteredClaimNames.Email, userName),
+                    new Claim(JwtRegisteredClaimNames.Jti, jti),
+                    new Claim("user_id", userId, ClaimValueTypes.String),
+                }),
+                Expires = DataTypeHelper.GetDateTimeUTCPlus7().AddMinutes(15),
+                Audience = "JwtSettings:Audience".GetConfigurationValue(),
+                Issuer = "JwtSettings:Issuer".GetConfigurationValue(),
+                SigningCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.RsaSha256)
+            });
+
+            return (token, jti);
         }
 
-        public SecurityToken GenerateRefreshToken(UserAuthenticationModel user)
+        public (SecurityToken Token, string Jti, DateTime ExpiresAt) GenerateRefreshToken(string userName)
         {
+            var jti = Guid.NewGuid().ToString();
+            var expiresAt = DataTypeHelper.GetDateTimeUTCPlus7().AddDays(7);
+            var signingKey = new RsaSecurityKey(_rsaKeyProvider.PrivateKey);
+
+            var token = _tokenHandler.CreateToken(new SecurityTokenDescriptor
+            {
+                Subject = new ClaimsIdentity(new[]
+                {
+                    new Claim(JwtRegisteredClaimNames.Sub, userName),
+                    new Claim(JwtRegisteredClaimNames.Jti, jti),
+                    new Claim("token_type", "refresh"),
+                }),
+                Expires = expiresAt,
+                Audience = "JwtSettings:Audience".GetConfigurationValue(),
+                Issuer = "JwtSettings:Issuer".GetConfigurationValue(),
+                SigningCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.RsaSha256)
+            });
+
+            return (token, jti, expiresAt);
+        }
+
+        public ClaimsPrincipal? ValidateRefreshToken(string token)
+        {
+            var validationKey = new RsaSecurityKey(_rsaKeyProvider.PublicKey);
+
+            var validationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidIssuer = "JwtSettings:Issuer".GetConfigurationValue(),
+                ValidateAudience = true,
+                ValidAudience = "JwtSettings:Audience".GetConfigurationValue(),
+                ValidateLifetime = true,
+                LifetimeValidator = (notBefore, expires, securityToken, parameters) =>
+                    expires > DataTypeHelper.GetDateTimeUTCPlus7(),
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = validationKey
+            };
+
             try
             {
-                var secretKey =
-                    new SymmetricSecurityKey(
-                        Encoding.UTF8.GetBytes("JwtSettings:RefreshTokenSecretKey".GetConfigurationValue()));
-                var accessTokenSecurityObject = _tokenHandler.CreateToken(new SecurityTokenDescriptor
-                {
-                    Subject = new ClaimsIdentity(new Claim[]
-                    {
-                        new Claim(ClaimTypes.Name, user.UserName),
-                    }),
-                    Expires = DataTypeHelper.GetDateTimeUTCPlus7().AddDays(1),
-                    Audience = "JwtSettings:Audience".GetConfigurationValue(),
-                    Issuer = "JwtSettings:Issuer".GetConfigurationValue(),
-                    SigningCredentials =
-                        new SigningCredentials(secretKey, SecurityAlgorithms.HmacSha256)
-                });
-
-                return accessTokenSecurityObject;
+                return _tokenHandler.ValidateToken(token, validationParameters, out _);
             }
-            catch (Exception e)
+            catch
             {
-                throw;
+                return null;
             }
         }
     }

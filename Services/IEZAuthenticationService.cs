@@ -1,4 +1,4 @@
-﻿using JwtTokenExample.Models;
+using JwtTokenExample.Models;
 
 namespace JwtTokenExample.Services
 {
@@ -7,5 +7,9 @@ namespace JwtTokenExample.Services
         bool UserLogin(UserAuthenticationModel user);
 
         AuthenticatedToken GetAuthenticatedToken(UserAuthenticationModel user);
+
+        AuthenticatedToken? RefreshAccessToken(string refreshToken);
+
+        UserAuthenticationModel? GetUserByName(string userName);
     }
 }
