@@ -1,18 +1,24 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace JwtTokenExample.Services
 {
     /// <summary>
     /// In-memory refresh token store with token family tracking.
+    /// Stores only SHA-256 hashes — the raw token never touches the server after generation.
     /// In production, replace with Redis or a database.
     /// </summary>
     public class RefreshTokenStore
     {
         private readonly ConcurrentDictionary<string, RefreshTokenEntry> _tokens = new();
 
-        public void Store(string tokenId, string familyId, string userName, DateTime expiresAt)
+        /// <summary>
+        /// Store a refresh token entry keyed by the SHA-256 hash of the raw token.
+        /// </summary>
+        public void Store(string tokenHash, string familyId, string userName, DateTime expiresAt)
         {
-            _tokens[tokenId] = new RefreshTokenEntry
+            _tokens[tokenHash] = new RefreshTokenEntry
             {
                 FamilyId = familyId,
                 UserName = userName,
@@ -21,15 +27,15 @@ namespace JwtTokenExample.Services
             };
         }
 
-        public RefreshTokenEntry? Get(string tokenId)
+        public RefreshTokenEntry? Get(string tokenHash)
         {
-            _tokens.TryGetValue(tokenId, out var entry);
+            _tokens.TryGetValue(tokenHash, out var entry);
             return entry;
         }
 
-        public void Revoke(string tokenId)
+        public void Revoke(string tokenHash)
         {
-            if (_tokens.TryGetValue(tokenId, out var entry))
+            if (_tokens.TryGetValue(tokenHash, out var entry))
                 entry.IsRevoked = true;
         }
 
@@ -54,6 +60,17 @@ namespace JwtTokenExample.Services
                 if (kvp.Value.ExpiresAt < now)
                     _tokens.TryRemove(kvp.Key, out _);
             }
+        }
+
+        /// <summary>
+        /// SHA-256 hash of the raw refresh token string.
+        /// We never store the plaintext — even if the store is compromised,
+        /// attackers cannot reconstruct valid refresh tokens.
+        /// </summary>
+        public static string HashToken(string rawToken)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
+            return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
         }
     }
 

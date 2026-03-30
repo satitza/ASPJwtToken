@@ -38,15 +38,15 @@ namespace JwtTokenExample.Services
             var jwtService = new JWTTokenService(tokenHandler, _rsaKeyProvider);
 
             var (accessToken, _) = jwtService.GenerateAccessToken(user.UserName!, "1234");
-            var (refreshToken, refreshJti, refreshExpires) = jwtService.GenerateRefreshToken(user.UserName!);
+            var (rawRefreshToken, refreshHash, refreshExpires) = jwtService.GenerateRefreshToken();
 
             var familyId = Guid.NewGuid().ToString();
-            _refreshTokenStore.Store(refreshJti, familyId, user.UserName!, refreshExpires);
+            _refreshTokenStore.Store(refreshHash, familyId, user.UserName!, refreshExpires);
 
             return new AuthenticatedToken
             {
                 AccessToken = tokenHandler.WriteToken(accessToken),
-                RefreshToken = tokenHandler.WriteToken(refreshToken)
+                RefreshToken = rawRefreshToken
             };
         }
 
@@ -58,48 +58,46 @@ namespace JwtTokenExample.Services
 
         public (AuthenticatedToken? Token, string? FailReason) RefreshAccessTokenDebug(string refreshTokenStr)
         {
-            var tokenHandler = new JwtSecurityTokenHandler();
-            var jwtService = new JWTTokenService(tokenHandler, _rsaKeyProvider);
+            // Step 1: Validate format BEFORE any store lookup (cheap rejection of garbage)
+            if (!JWTTokenService.ValidateRefreshTokenFormat(refreshTokenStr))
+                return (null, "Step 1 FAILED: Invalid refresh token format. "
+                    + "Token must match pattern 'rt1.{Base64Url(32 bytes)}'.");
 
-            // Step 1: Validate JWT signature & expiry
-            var principal = jwtService.ValidateRefreshToken(refreshTokenStr);
-            if (principal == null)
-                return (null, "Step 1 FAILED: JWT validation failed (bad signature, expired, or wrong issuer/audience). "
-                    + $"Server time (UTC+7): {DataTypeHelper.GetDateTimeUTCPlus7():yyyy-MM-dd HH:mm:ss}");
-
-            // Step 2: Extract claims
-            var jti = principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
-            var userName = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-
-            if (jti == null || userName == null)
-                return (null, $"Step 2 FAILED: Claims missing. jti={jti ?? "null"}, sub={userName ?? "null"}");
-
-            // Step 3: Check token store
-            var storedToken = _refreshTokenStore.Get(jti);
+            // Step 2: Hash the token and look up in store
+            var tokenHash = RefreshTokenStore.HashToken(refreshTokenStr);
+            var storedToken = _refreshTokenStore.Get(tokenHash);
             if (storedToken == null)
-                return (null, $"Step 3 FAILED: jti '{jti}' not found in RefreshTokenStore. "
+                return (null, "Step 2 FAILED: Token not found in store. "
                     + "This happens when the server was restarted (in-memory store was cleared). Login again.");
 
-            // Step 4: Check revocation
+            // Step 3: Check expiration
+            if (storedToken.ExpiresAt < DataTypeHelper.GetDateTimeUTCPlus7())
+                return (null, $"Step 3 FAILED: Token expired at {storedToken.ExpiresAt:yyyy-MM-dd HH:mm:ss}. "
+                    + $"Server time (UTC+7): {DataTypeHelper.GetDateTimeUTCPlus7():yyyy-MM-dd HH:mm:ss}");
+
+            // Step 4: Check revocation (token theft detection)
             if (storedToken.IsRevoked)
             {
                 _refreshTokenStore.RevokeFamily(storedToken.FamilyId);
-                return (null, $"Step 4 FAILED: Token jti '{jti}' was already REVOKED (reuse detected!). Entire token family revoked.");
+                return (null, "Step 4 FAILED: Token was already REVOKED (reuse detected!). Entire token family revoked.");
             }
 
             // Revoke the current refresh token (single use)
-            _refreshTokenStore.Revoke(jti);
+            _refreshTokenStore.Revoke(tokenHash);
 
             // Issue new token pair with the same family
-            var (newAccessToken, _) = jwtService.GenerateAccessToken(userName, "1234");
-            var (newRefreshToken, newRefreshJti, newRefreshExpires) = jwtService.GenerateRefreshToken(userName);
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var jwtService = new JWTTokenService(tokenHandler, _rsaKeyProvider);
 
-            _refreshTokenStore.Store(newRefreshJti, storedToken.FamilyId, userName, newRefreshExpires);
+            var (newAccessToken, _) = jwtService.GenerateAccessToken(storedToken.UserName, "1234");
+            var (newRawRefreshToken, newRefreshHash, newRefreshExpires) = jwtService.GenerateRefreshToken();
+
+            _refreshTokenStore.Store(newRefreshHash, storedToken.FamilyId, storedToken.UserName, newRefreshExpires);
 
             return (new AuthenticatedToken
             {
                 AccessToken = tokenHandler.WriteToken(newAccessToken),
-                RefreshToken = tokenHandler.WriteToken(newRefreshToken)
+                RefreshToken = newRawRefreshToken
             }, null);
         }
     }
