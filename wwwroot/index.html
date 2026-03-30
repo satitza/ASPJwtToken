@@ -65,6 +65,13 @@
         .cookie-hint { background: #1a1a2e; border: 1px dashed #475569; border-radius: 8px; padding: 12px; font-size: 0.8rem; color: #94a3b8; line-height: 1.6; margin-top: 8px; }
         .cookie-hint strong { color: #fbbf24; }
         .highlight { background: #fbbf2420; padding: 2px 6px; border-radius: 4px; }
+
+        /* Flow diagram */
+        .flow { font-family: monospace; font-size: 0.78rem; line-height: 1.7; white-space: pre; color: #94a3b8; overflow-x: auto; }
+        .flow .step { color: #38bdf8; }
+        .flow .ok { color: #22c55e; }
+        .flow .fail { color: #ef4444; }
+        .flow .arrow { color: #fbbf24; }
     </style>
 </head>
 <body>
@@ -83,9 +90,10 @@
             <button class="btn-danger" onclick="logout()">Logout</button>
         </div>
         <div class="actions" style="margin-top: 10px;">
-            <button class="btn-warning btn-sm" onclick="refreshToken()">Refresh Token</button>
-            <button class="btn-success btn-sm" onclick="callProtectedApi()">Call /WeatherForecast (Protected)</button>
-            <button class="btn-sm" style="background:#475569;color:white;" onclick="callProtectedApiExpired()">Call with Expired Token (simulate)</button>
+            <button class="btn-warning btn-sm" onclick="refreshToken()">Refresh Token (manual)</button>
+            <button class="btn-success btn-sm" onclick="callProtectedApi()">Call /WeatherForecast (auto-refresh on 401)</button>
+            <button class="btn-sm" style="background:#475569;color:white;" onclick="callProtectedApiExpired()">Call with Invalid Token</button>
+            <button class="btn-sm" style="background:#7c3aed;color:white;" onclick="debugCookies()">Debug: Check Cookies on Server</button>
         </div>
     </div>
 
@@ -96,6 +104,33 @@
             <div class="status-item">Storage: <span class="highlight">JavaScript Variable (Memory)</span></div>
             <div class="status-item">Refresh Token: <span class="highlight">HttpOnly Cookie</span></div>
         </div>
+    </div>
+
+    <!-- Auto-Refresh Flow Diagram -->
+    <div class="card">
+        <h2>authFetch() - Auto Refresh Flow</h2>
+        <div class="flow"><span class="step">JS: authFetch("/api/weather")</span>
+  <span class="arrow">│</span>
+  <span class="arrow">├─►</span> <span class="step">fetch("/api/weather", { Authorization: Bearer &lt;accessToken&gt; })</span>
+  <span class="arrow">│</span>       <span class="arrow">│</span>
+  <span class="arrow">│</span>       <span class="arrow">├─►</span> <span class="ok">200 OK → return data (done!)</span>
+  <span class="arrow">│</span>       <span class="arrow">│</span>
+  <span class="arrow">│</span>       <span class="arrow">└─►</span> <span class="fail">401 Unauthorized</span> (token expired)
+  <span class="arrow">│</span>               <span class="arrow">│</span>
+  <span class="arrow">│</span>               <span class="arrow">▼</span>
+  <span class="arrow">├─►</span> <span class="step">fetch("/Authentication/refresh", { credentials: "include" })</span>
+  <span class="arrow">│</span>   Browser sends <span class="ok">HttpOnly cookie</span> automatically (JS never touches it)
+  <span class="arrow">│</span>       <span class="arrow">│</span>
+  <span class="arrow">│</span>       <span class="arrow">├─►</span> <span class="ok">200 OK</span> → new accessToken in body + new refreshToken cookie (rotation)
+  <span class="arrow">│</span>       <span class="arrow">│</span>       <span class="arrow">│</span>
+  <span class="arrow">│</span>       <span class="arrow">│</span>       <span class="arrow">▼</span>
+  <span class="arrow">│</span>       <span class="arrow">│</span>   <span class="step">RETRY original request with new accessToken</span> <span class="arrow">→</span> <span class="ok">200 OK</span>
+  <span class="arrow">│</span>       <span class="arrow">│</span>
+  <span class="arrow">│</span>       <span class="arrow">└─►</span> <span class="fail">401 FAIL</span> → refresh token also expired/revoked → <span class="fail">force logout</span>
+  <span class="arrow">│</span>
+  <span class="arrow">└─►</span> Why doesn't the browser do this automatically?
+      Browser only auto-sends <span class="ok">cookies</span>. It does NOT understand JWT or "token refresh".
+      This logic lives in <span class="step">JavaScript</span> (authFetch wrapper / Axios interceptor / etc.)</div>
     </div>
 
     <div class="grid-2">
@@ -124,8 +159,8 @@
                 Properties to observe:<br>
                 - <strong>HttpOnly</strong>: true (JS cannot access)<br>
                 - <strong>Secure</strong>: true (HTTPS only)<br>
-                - <strong>SameSite</strong>: Strict (CSRF protection)<br>
-                - <strong>Path</strong>: /Authentication/refresh (only sent to this endpoint)
+                - <strong>SameSite</strong>: Lax (CSRF protection)<br>
+                - <strong>Path</strong>: /Authentication (sent to all auth endpoints)
             </div>
             <div class="label">document.cookie (proof JS can't read it)</div>
             <div class="token-box" id="cookieDisplay">-</div>
@@ -149,14 +184,115 @@
 <script>
 // ============================================================
 // Token Storage - Access token lives ONLY in this JS variable
-// This is the recommended approach (not localStorage/sessionStorage)
-// because it's not accessible via XSS attacks on other scripts
 // ============================================================
 let accessToken = null;
 let tokenExpiry = null;
 let countdownInterval = null;
+let isRefreshing = false;     // guard: prevent multiple refresh calls
+let refreshQueue = [];        // queue requests waiting for refresh
 
 const API_BASE = '';  // same origin
+
+// ============================================================
+// authFetch - fetch wrapper ที่ auto-refresh เมื่อได้ 401
+// ============================================================
+// Flow:
+//   1. call API with current accessToken
+//   2. if 401 → call /Authentication/refresh (cookie sent auto)
+//   3. if refresh OK → update accessToken → retry original request
+//   4. if refresh FAIL → force logout
+//
+// ทำไมต้องเขียนเอง?
+//   Browser ไม่มี built-in token refresh. Browser รู้จักแค่:
+//   - Cookie (ส่งเองอัตโนมัติ)
+//   - Authorization header (ต้อง set เอง)
+//   Browser ไม่รู้ว่า "401 = ต้อง refresh" เพราะนั่นเป็น logic ของ app
+// ============================================================
+async function authFetch(url, options = {}) {
+    // Step 1: ใส่ Authorization header
+    if (accessToken) {
+        options.headers = { ...options.headers, 'Authorization': `Bearer ${accessToken}` };
+    }
+
+    const res = await fetch(url, options);
+
+    // Step 2: ถ้าไม่ใช่ 401 → return ปกติ
+    if (res.status !== 401) return res;
+
+    log('↳ Got 401! Starting auto-refresh flow...', 'warn');
+
+    // Step 3: ถ้ากำลัง refresh อยู่ → รอ queue (ป้องกัน refresh ซ้ำ)
+    if (isRefreshing) {
+        log('↳ Another refresh is in progress, queuing this request...', 'warn');
+        return new Promise((resolve) => {
+            refreshQueue.push(() => {
+                options.headers = { ...options.headers, 'Authorization': `Bearer ${accessToken}` };
+                resolve(fetch(url, options));
+            });
+        });
+    }
+
+    // Step 4: Refresh!
+    isRefreshing = true;
+    log('↳ POST /Authentication/refresh (auto)', 'info');
+
+    try {
+        const refreshRes = await fetch(`${API_BASE}/Authentication/refresh`, {
+            method: 'POST',
+            credentials: 'include'
+        });
+
+        if (refreshRes.ok) {
+            const data = await refreshRes.json();
+            const oldJti = decodeJwtPart(accessToken?.split('.')[1])?.jti;
+            accessToken = data.accessToken;
+            const newJti = decodeJwtPart(accessToken.split('.')[1])?.jti;
+
+            log('↳ Refresh SUCCESS! New access token received', 'success');
+            log(`↳ Token rotated: jti ${oldJti?.substring(0,8)}... → ${newJti?.substring(0,8)}...`, 'success');
+
+            displayAccessToken(accessToken);
+            updateAuthStatus(true);
+            showCookieStatus();
+
+            // Step 5: Retry original request with new token
+            log(`↳ Retrying original request: ${options.method || 'GET'} ${url}`, 'info');
+            options.headers = { ...options.headers, 'Authorization': `Bearer ${accessToken}` };
+            const retryRes = await fetch(url, options);
+
+            // Drain queue - retry all waiting requests
+            refreshQueue.forEach(cb => cb());
+            refreshQueue = [];
+
+            return retryRes;
+        } else {
+            // Refresh failed → show debug info from server
+            const errData = await refreshRes.json().catch(() => ({}));
+            log(`↳ Refresh FAILED: ${errData.message || refreshRes.statusText}`, 'error');
+            if (errData.debug) {
+                log(`↳ Debug hint: ${errData.debug.hint}`, 'error');
+                log(`↳ Cookies server received: [${errData.debug.cookiesReceived || 'none'}]`, 'error');
+                log(`↳ Request path: ${errData.debug.requestPath}`, 'error');
+                if (errData.debug.tokenLength) {
+                    log(`↳ Token was sent (${errData.debug.tokenLength} chars) but rejected`, 'error');
+                }
+            }
+            log('↳ Session expired. Please login again.', 'error');
+            accessToken = null;
+            tokenExpiry = null;
+            clearTokenDisplay();
+            updateAuthStatus(false);
+            refreshQueue = [];
+            return res; // return original 401
+        }
+    } catch (err) {
+        log(`↳ Refresh error: ${err.message}`, 'error');
+        refreshQueue = [];
+        return res;
+    } finally {
+        isRefreshing = false;
+    }
+}
 
 // ============================================================
 // Helpers
@@ -284,10 +420,14 @@ async function login() {
 
         if (res.ok) {
             accessToken = data.accessToken;
-            log(`Login successful! Access token received (${accessToken.length} chars)`, 'success');
-            log(`Response headers:`, 'info');
-            res.headers.forEach((v, k) => log(`  ${k}: ${v}`, 'info'));
-            log(`Set-Cookie header is hidden from JS (browser security) but the cookie IS set`, 'warn');
+            log(`Login successful!`, 'success');
+            log(``, 'info');
+            log(`Access Token: returned in JSON body → stored in JS variable`, 'success');
+            log(`Refresh Token: returned via Set-Cookie header → stored as HttpOnly cookie`, 'success');
+            log(``, 'info');
+            log(`JS cannot read Set-Cookie header (browser security).`, 'warn');
+            log(`To verify: DevTools (F12) → Network tab → click "login" request → Response Headers → look for "Set-Cookie: refreshToken=..."`, 'warn');
+            log(`Or: DevTools → Application tab → Cookies → look for "refreshToken"`, 'warn');
 
             displayAccessToken(accessToken);
             updateAuthStatus(true);
@@ -356,7 +496,11 @@ async function refreshToken() {
             showCookieStatus();
         } else {
             log(`Refresh failed: ${data.message || res.statusText}`, 'error');
-            log('This could mean: token expired, revoked, or theft detected (family revoked)', 'error');
+            if (data.debug) {
+                log(`Debug hint: ${data.debug.hint}`, 'error');
+                log(`Cookies server received: [${data.debug.cookiesReceived || 'none'}]`, 'error');
+                log(`Request path: ${data.debug.requestPath}`, 'error');
+            }
             updateAuthStatus(false);
         }
     } catch (err) {
@@ -373,15 +517,8 @@ async function callProtectedApi() {
     log(`GET /WeatherForecast/GetWeatherForecast  (Authorization: Bearer ${accessToken.substring(0, 20)}...)`, 'info');
 
     try {
-        const res = await fetch(`${API_BASE}/WeatherForecast/GetWeatherForecast`, {
-            headers: { 'Authorization': `Bearer ${accessToken}` }
-        });
-
-        // Check for token expired header
-        const tokenExpiredHeader = res.headers.get('X-Token-Expired');
-        if (tokenExpiredHeader) {
-            log(`Response header X-Token-Expired: ${tokenExpiredHeader}`, 'error');
-        }
+        // ใช้ authFetch แทน fetch ตรงๆ → ถ้า 401 จะ auto-refresh แล้ว retry
+        const res = await authFetch(`${API_BASE}/WeatherForecast/GetWeatherForecast`);
 
         if (res.ok) {
             const data = await res.json();
@@ -390,7 +527,7 @@ async function callProtectedApi() {
         } else {
             log(`Protected API returned ${res.status}: ${res.statusText}`, 'error');
             if (res.status === 401) {
-                log('401 Unauthorized - Token may be expired. Try refreshing!', 'error');
+                log('Session expired completely. Please login again.', 'error');
             }
         }
     } catch (err) {
@@ -414,6 +551,35 @@ async function callProtectedApiExpired() {
         }
     } catch (err) {
         log(`Network error: ${err.message}`, 'error');
+    }
+}
+
+async function debugCookies() {
+    log('--- DEBUG: Checking what cookies the server receives ---', 'warn');
+
+    // Test 1: call debug endpoint (same path prefix as refresh)
+    try {
+        const res = await fetch(`${API_BASE}/Authentication/debug-cookies`, { credentials: 'include' });
+        const data = await res.json();
+        log(`Server sees cookies: [${data.cookiesReceived.join(', ') || 'NONE'}]`, data.hasRefreshToken ? 'success' : 'error');
+        log(`Has refreshToken cookie: ${data.hasRefreshToken}`, data.hasRefreshToken ? 'success' : 'error');
+        log(`Request path: ${data.requestPath}`, 'info');
+        log(`Is HTTPS: ${data.isSecure}`, 'info');
+        log(`Is Development: ${data.isDevelopment}`, 'info');
+
+        if (!data.hasRefreshToken) {
+            log('', 'info');
+            log('PROBLEM: Server did not receive the refreshToken cookie!', 'error');
+            log('Possible causes:', 'error');
+            log('  1. Cookie was never set (check DevTools → Application → Cookies)', 'error');
+            log('  2. Cookie Path mismatch (cookie Path must match request URL)', 'error');
+            log('  3. Secure flag issue (cookie Secure=true but using HTTP)', 'error');
+            log('  4. SameSite restriction', 'error');
+            log('', 'info');
+            log('Check DevTools → Application → Cookies to see if the cookie exists', 'warn');
+        }
+    } catch (err) {
+        log(`Debug request failed: ${err.message}`, 'error');
     }
 }
 

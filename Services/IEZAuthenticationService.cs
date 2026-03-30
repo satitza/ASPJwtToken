@@ -10,6 +10,8 @@ namespace JwtTokenExample.Services
 
         AuthenticatedToken? RefreshAccessToken(string refreshToken);
 
+        (AuthenticatedToken? Token, string? FailReason) RefreshAccessTokenDebug(string refreshToken);
+
         UserAuthenticationModel? GetUserByName(string userName);
     }
 }

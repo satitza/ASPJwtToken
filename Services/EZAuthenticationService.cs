@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using JwtTokenExample.Configuration;
 using JwtTokenExample.Models;
 
 namespace JwtTokenExample.Services
@@ -51,29 +52,39 @@ namespace JwtTokenExample.Services
 
         public AuthenticatedToken? RefreshAccessToken(string refreshTokenStr)
         {
+            var (token, _) = RefreshAccessTokenDebug(refreshTokenStr);
+            return token;
+        }
+
+        public (AuthenticatedToken? Token, string? FailReason) RefreshAccessTokenDebug(string refreshTokenStr)
+        {
             var tokenHandler = new JwtSecurityTokenHandler();
             var jwtService = new JWTTokenService(tokenHandler, _rsaKeyProvider);
 
+            // Step 1: Validate JWT signature & expiry
             var principal = jwtService.ValidateRefreshToken(refreshTokenStr);
             if (principal == null)
-                return null;
+                return (null, "Step 1 FAILED: JWT validation failed (bad signature, expired, or wrong issuer/audience). "
+                    + $"Server time (UTC+7): {DataTypeHelper.GetDateTimeUTCPlus7():yyyy-MM-dd HH:mm:ss}");
 
+            // Step 2: Extract claims
             var jti = principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
             var userName = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
 
             if (jti == null || userName == null)
-                return null;
+                return (null, $"Step 2 FAILED: Claims missing. jti={jti ?? "null"}, sub={userName ?? "null"}");
 
+            // Step 3: Check token store
             var storedToken = _refreshTokenStore.Get(jti);
             if (storedToken == null)
-                return null;
+                return (null, $"Step 3 FAILED: jti '{jti}' not found in RefreshTokenStore. "
+                    + "This happens when the server was restarted (in-memory store was cleared). Login again.");
 
-            // Token reuse detection: if this token was already revoked,
-            // someone might have stolen the token. Revoke the entire family.
+            // Step 4: Check revocation
             if (storedToken.IsRevoked)
             {
                 _refreshTokenStore.RevokeFamily(storedToken.FamilyId);
-                return null;
+                return (null, $"Step 4 FAILED: Token jti '{jti}' was already REVOKED (reuse detected!). Entire token family revoked.");
             }
 
             // Revoke the current refresh token (single use)
@@ -85,11 +96,11 @@ namespace JwtTokenExample.Services
 
             _refreshTokenStore.Store(newRefreshJti, storedToken.FamilyId, userName, newRefreshExpires);
 
-            return new AuthenticatedToken
+            return (new AuthenticatedToken
             {
                 AccessToken = tokenHandler.WriteToken(newAccessToken),
                 RefreshToken = tokenHandler.WriteToken(newRefreshToken)
-            };
+            }, null);
         }
     }
 }

@@ -31,7 +31,7 @@ namespace JwtTokenExample.Services
                     new Claim(JwtRegisteredClaimNames.Jti, jti),
                     new Claim("user_id", userId, ClaimValueTypes.String),
                 }),
-                Expires = DataTypeHelper.GetDateTimeUTCPlus7().AddMinutes(15),
+                Expires = DataTypeHelper.GetDateTimeUTCPlus7().AddMinutes(1),
                 Audience = "JwtSettings:Audience".GetConfigurationValue(),
                 Issuer = "JwtSettings:Issuer".GetConfigurationValue(),
                 SigningCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.RsaSha256)
@@ -43,7 +43,7 @@ namespace JwtTokenExample.Services
         public (SecurityToken Token, string Jti, DateTime ExpiresAt) GenerateRefreshToken(string userName)
         {
             var jti = Guid.NewGuid().ToString();
-            var expiresAt = DataTypeHelper.GetDateTimeUTCPlus7().AddDays(7);
+            var expiresAt = DataTypeHelper.GetDateTimeUTCPlus7().AddDays(1);
             var signingKey = new RsaSecurityKey(_rsaKeyProvider.PrivateKey);
 
             var token = _tokenHandler.CreateToken(new SecurityTokenDescriptor
@@ -66,6 +66,10 @@ namespace JwtTokenExample.Services
         public ClaimsPrincipal? ValidateRefreshToken(string token)
         {
             var validationKey = new RsaSecurityKey(_rsaKeyProvider.PublicKey);
+
+            // Disable .NET's auto-mapping of JWT claims (e.g. "sub" → ClaimTypes.NameIdentifier)
+            // so we can read claims by their original JWT names like "sub", "jti", etc.
+            _tokenHandler.InboundClaimTypeMap.Clear();
 
             var validationParameters = new TokenValidationParameters
             {
